@@ -195,7 +195,7 @@
                     (data (if (minusp row)
                               (return-from add-range)
                               (aref data row))))
-               (assert (not (row-data-rhs data)))
+               (assert (not (row-data-range data)))
                (setf (row-data-range data) value))))
       (let ((range-name nil))
         (loop

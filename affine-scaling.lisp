@@ -148,18 +148,14 @@
                       (affine-c state)
                       (affine-A state)))
          (g (matlisp:m.* dg slack)))
-    ;; better be a descent direction
-    (assert (minusp (matlisp:dot g (affine-c state))))
-    ;; and better satisfy the equality constraint
-    #+nil
-    (assert (< (matlisp:norm (matlisp:m* (affine-A state) g))
-               1d-4))
     (let ((step (* *gamma* (max-step l x u g)))
           (norm-g (matlisp:norm g)))
       (when (> step 1d10)
         (error "Unbounded problem"))
       (format t "~12,5g " norm-g)
-      (when (< (min (* step norm-g) norm-g) 1d-6)
+      (when (or (< (min (* step norm-g) norm-g)
+                   (* 1d-8 (matlisp:nrows g)))
+                (plusp (matlisp:dot g (affine-c state))))
         (return-from one-affine-scaling-iteration
           (values state nil)))
       (setf (affine-x state)
@@ -197,7 +193,7 @@
   (declare (type affine-scaling-state state))
   (let* ((residual (residual state))
          (norm (matlisp:norm residual)))
-    (cond ((> norm 5d-7)
+    (cond ((> norm (* 1d-6 (matlisp:nrows residual)))
            (prog2 (format t "Repair:   ~12,5g ... " norm)
                (multiple-value-list (one-repair-iteration state residual))
              (format t "~12,5g~%" (matlisp:norm (residual state)))))
@@ -215,9 +211,10 @@
           (format t "~4d: " i)
           (destructuring-bind (state continue)
               (one-iteration state)
-            (let ((residual (matlisp:norm (residual state))))
+            (let* ((residual (residual state))
+                   (norm (matlisp:norm residual)))
               (unless (or continue
-                          (> residual 1d-6))
+                          (> norm (* 1d-6 (matlisp:nrows residual))))
                 (return (values (matlisp:dot (affine-x state)
                                              (affine-c state))
                                 (affine-x state)

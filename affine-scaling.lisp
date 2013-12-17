@@ -53,30 +53,23 @@
 
 (defstruct (project-work-space
             (:conc-name #:proj-))
-  A
   scale
   B
   BBt
   c
-  d
-  lwork
-  work)
+  d)
 
 (defvar *work-space*)
 
 (defun allocate-work-space (n p)
   (or *work-space*
       (setf *work-space*
-            (let ((lwork (+ n p (* (max p n) 10))))
-              (make-project-work-space
-               :A (matlisp:make-real-matrix-dim n n)
-               :scale (matlisp:make-real-matrix-dim n n)
-               :B (matlisp:make-real-matrix-dim p n)
-               :BBt (matlisp:make-real-matrix-dim p p)
-               :c (matlisp:make-real-matrix-dim n 1)
-               :d (matlisp:make-real-matrix-dim p 1)
-               :lwork lwork
-               :work (matlisp::allocate-real-store lwork))))))
+            (make-project-work-space
+             :scale (matlisp:make-real-matrix-dim n n)
+             :B (matlisp:make-real-matrix-dim p n)
+             :BBt (matlisp:make-real-matrix-dim p p)
+             :c (matlisp:make-real-matrix-dim n 1)
+             :d (matlisp:make-real-matrix-dim p 1)))))
 
 (defun scale-constraints (constraints scale)
   (let* ((n (matlisp:ncols constraints))

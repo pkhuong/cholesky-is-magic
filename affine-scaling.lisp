@@ -37,6 +37,31 @@
      :l (matlisp:make-real-matrix (sf-l sf))
      :u (matlisp:make-real-matrix (sf-u sf)))))
 
+(defstruct (project-work-space
+            (:conc-name #:proj-))
+  A
+  scale
+  B
+  c
+  d
+  lwork
+  work)
+
+(defvar *work-space*)
+
+(defun allocate-work-space (n p)
+  (or *work-space*
+      (setf *work-space*
+            (let ((lwork (+ n p (* (max p n) 10))))
+              (make-project-work-space
+               :A (matlisp:make-real-matrix-dim n n)
+               :scale (matlisp:make-real-matrix-dim n n)
+               :B (matlisp:make-real-matrix-dim p n)
+               :c (matlisp:make-real-matrix-dim n 1)
+               :d (matlisp:make-real-matrix-dim p 1)
+               :lwork lwork
+               :work (matlisp::allocate-real-store lwork))))))
+
 (defun project (scale c constraints &optional rhs)
   ;; min || Ix - [scale]c ||_2
   ;;  s.t.  [constraints][scale]x = 0
@@ -47,31 +72,39 @@
   (let* ((m (matlisp:nrows c))
          (n m)
          (p (matlisp:nrows constraints))
-         (A (matlisp:scal! -1 (matlisp:eye n)))
-         (scale (let ((m (matlisp:make-real-matrix-dim n m)))
+         (proj (allocate-work-space n p))
+         (A (proj-A proj))
+         (c (matlisp:m.*! scale
+                          (matlisp:copy! c (proj-c proj))))
+         (scale (let ((m (proj-scale proj)))
                   (setf (matlisp:diag m) scale)
                   m))
-         (B (matlisp:m* constraints scale))
-         (c (matlisp:m* scale c))
-         (d (if rhs
-                (matlisp:copy rhs)
-                (matlisp:make-real-matrix-dim p 1)))
-         (lwork (+ n p (* (max m p n) 10))))
+         (B (matlisp:gemm! 1 constraints scale
+                           0 (proj-B proj)))
+         (d (let ((d (proj-d proj)))
+              (if rhs
+                  (matlisp:copy! rhs d)
+                  (matlisp:fill-matrix d 0)))))
+    (matlisp:fill-matrix A 0)
+    (setf (matlisp:diag A) -1)
     (multiple-value-bind (A B c d x work info)
         (lapack:dgglse m n p
                        (matlisp::store A) (max 1 m)
                        (matlisp::store B) (max 1 p)
                        (matlisp::store c) (matlisp::store d)
                        (matlisp::allocate-real-store m)
-                       (matlisp::allocate-real-store lwork) lwork
+                       (proj-work proj) (proj-lwork proj)
                        0)
       (declare (ignore A B c d))
       (assert (= info 0))
-      (let ((x (make-instance 'matlisp:real-matrix
-                              :nrows m
-                              :ncols 1
-                              :store x)))
-        (values x (ceiling (aref work 0)))))))
+      (let ((lwork (ceiling (aref work 0))))
+        (when (> lwork (proj-lwork proj))
+          (setf (proj-lwork proj) lwork
+                (proj-work proj) (matlisp::allocate-real-store lwork))))
+      (make-instance 'matlisp:real-matrix
+                     :nrows m
+                     :ncols 1
+                     :store x))))
 
 (defvar *max-slack* 1d10)
 
@@ -177,12 +210,13 @@
 
 (defun affine-scaling (state)
   (declare (type affine-scaling-state state))
-  (loop for i upfrom 0 do
-    (format t "~4d: " i)
-    (destructuring-bind (state continue)
-        (one-iteration state)
-      (unless continue
-        (return (values (matlisp:dot (affine-x state)
-                                     (affine-c state))
-                        (affine-x state)
-                        (matlisp:norm (residual state))))))))
+  (loop with *work-space* = nil
+        for i upfrom 0 do
+          (format t "~4d: " i)
+          (destructuring-bind (state continue)
+              (one-iteration state)
+            (unless continue
+              (return (values (matlisp:dot (affine-x state)
+                                           (affine-c state))
+                              (affine-x state)
+                              (matlisp:norm (residual state))))))))

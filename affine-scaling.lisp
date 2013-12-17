@@ -94,7 +94,9 @@
       (lapack:dpotrf "L" n
                      (matlisp::store A) (max 1 n)
                      0)
-    (assert (zerop info))
+    (unless (zerop info)
+      (format t " (DPOTRF: ~A) " info)
+      (return-from solve-symmetric!))
     (multiple-value-bind (solution info)
         (lapack:dpotrs "L" n 1
                        factor (max 1 n)
@@ -120,7 +122,11 @@
          (B (scale-constraints constraints scale))
          (N (matlisp:gemm! 1 B B 0 (proj-BBt proj) :nt))
          (Bc (matlisp:m* B c))
-         (N^-1Bc (solve-symmetric! N bc)))
+         (N^-1Bc (or (solve-symmetric! N bc)
+                     (matlisp:gelsy! (matlisp:gemm! 1 B B 0 (proj-BBt proj)
+                                                    :nt)
+                                     (matlisp:m* B c)
+                                     1d-10))))
     ;; c - Bt N^-1 B c
     (matlisp:gemm! -1 B N^-1Bc 1 c :tn)))
 

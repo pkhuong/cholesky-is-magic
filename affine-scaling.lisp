@@ -86,6 +86,24 @@
     (matlisp:gemm! 1 constraints scale
                    0 (proj-B proj))))
 
+(defun solve-symmetric! (A x &aux (n (matlisp:nrows A)))
+  ;; A\x, destructive on both
+  ;;
+  ;; Cholesky *should* be Good Enough.
+  (multiple-value-bind (factor info)
+      (lapack:dpotrf "L" n
+                     (matlisp::store A) (max 1 n)
+                     0)
+    (assert (zerop info))
+    (multiple-value-bind (solution info)
+        (lapack:dpotrs "L" n 1
+                       factor (max 1 n)
+                       (matlisp::store x) (max 1 n)
+                       0)
+      (assert (zerop info))
+      (setf (matlisp::store x) solution)
+      x)))
+
 (defun project (scale c constraints)
   ;; min || x + [scale]c ||_2
   ;;  s.t.  [constraints][scale]x = 0
@@ -102,7 +120,7 @@
          (B (scale-constraints constraints scale))
          (N (matlisp:gemm! 1 B B 0 (proj-BBt proj) :nt))
          (Bc (matlisp:m* B c))
-         (N^-1Bc (matlisp:gelsy! N Bc 1d-12)))
+         (N^-1Bc (solve-symmetric! N bc)))
     ;; c - Bt N^-1 B c
     (matlisp:gemm! -1 B N^-1Bc 1 c :tn)))
 

@@ -1,8 +1,9 @@
+;; see http://web.mit.edu/lpsolve/doc/mps-format.htm
 (require "split-sequence")
 (require "alexandria")
 
 (defstruct row-data
-  name type rhs range)
+  name type rhs range lb ub)
 
 (defstruct col-data
   ;; default: [0, infty)
@@ -14,7 +15,7 @@
 (defstruct mps-data
   name
   ;; default: min
-  sense
+  (sense nil :type (member nil min max))
   ;; name -> index
   (rows (make-hash-table :test #'equalp) :read-only t)
   ;; index -> (name type rhs)
@@ -55,9 +56,9 @@
 
 (defun read-name (line)
   (assert (equalp "name" (first line)))
-  (assert (= 2 (length line)))
+  (assert (>= (length line) 2))
   (assert (not (mps-data-name *mps-data*)))
-  (setf (mps-data-name *mps-data*) (second line))
+  (setf (mps-data-name *mps-data*) (format nil "~{~A~^ ~}" (rest line)))
   (get-section-line))
 
 (defun read-sense (line)
@@ -164,7 +165,7 @@
                              (error "Unknown row ~A" row)))
                     (value (mps-float value))
                     (data (if (minusp row)
-                              (return-from add-rhs)
+                              (return-from add-rhs (Format t "~A~%" row))
                               (aref data row))))
                (assert (not (row-data-rhs data)))
                (setf (row-data-rhs data) value))))
@@ -290,3 +291,36 @@
 (defun read-mps-file (file)
   (with-open-file (s file :external-format :utf-8)
     (read-mps s)))
+
+(defun post-process-mps (mps)
+  (declare (type mps-data mps))
+  (unless (mps-data-sense mps)
+    (setf (mps-data-sense mps) 'min))
+  (map nil (lambda (row)
+             (let* ((rhs (or (row-data-rhs row)
+                             0d0))
+                    (range (row-data-range row))
+                    (abs-range (and range (abs range))))
+               (check-type rhs double-float)
+               (check-type range (or null double-float))
+               (setf (values (row-data-lb row)
+                             (row-data-ub row))
+                     (if range
+                         (ecase (row-data-type row)
+                           (<= (values (- rhs abs-range) rhs))
+                           (>= (values rhs (+ rhs abs-range)))
+                           (=  (if (minusp range)
+                                   (values (+ rhs range) rhs)
+                                   (values rhs (+ rhs range)))))
+                         (ecase (row-data-type row)
+                           (<= (values double-float-negative-infinity rhs))
+                           (>= (values rhs double-float-positive-infinity))
+                           (=  (values rhs rhs)))))
+               (assert (<= (row-data-lb row) (row-data-ub row)))))
+       (mps-data-row-data mps))
+  (map nil (lambda (col)
+             (unless (col-data-lb col)
+               (setf (col-data-lb col) 0d0))
+             (unless (col-data-ub col)
+               (setf (col-data-ub col) double-float-positive-infinity)))
+       (mps-data-col-data mps)))

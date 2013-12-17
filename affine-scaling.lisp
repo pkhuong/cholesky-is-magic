@@ -56,6 +56,7 @@
   A
   scale
   B
+  BBt
   c
   d
   lwork
@@ -71,6 +72,7 @@
                :A (matlisp:make-real-matrix-dim n n)
                :scale (matlisp:make-real-matrix-dim n n)
                :B (matlisp:make-real-matrix-dim p n)
+               :BBt (matlisp:make-real-matrix-dim p p)
                :c (matlisp:make-real-matrix-dim n 1)
                :d (matlisp:make-real-matrix-dim p 1)
                :lwork lwork
@@ -84,47 +86,27 @@
     (matlisp:gemm! 1 constraints scale
                    0 (proj-B proj))))
 
-(defun project (scale c constraints &optional rhs)
-  ;; min || Ix - [scale]c ||_2
+(defun project (scale c constraints)
+  ;; min || x + [scale]c ||_2
   ;;  s.t.  [constraints][scale]x = 0
   ;;
-  ;; In DGGLSE:
-  ;;   A = I
-  ;;   B = A[scale]
+  ;; Let B = [constraints][scale], N = BB', c = -[scale]c
+  ;;
+  ;; x = c - B'N^-1 B c
   (let* ((m (matlisp:nrows c))
          (n m)
          (p (matlisp:nrows constraints))
          (proj (allocate-work-space n p))
-         (A (proj-A proj))
          (c (matlisp:m.*! scale
-                          (matlisp:copy! c (proj-c proj))))
+                          (matlisp:scal -1 c)))
          (B (scale-constraints constraints scale))
-         (d (let ((d (proj-d proj)))
-              (if rhs
-                  (matlisp:copy! rhs d)
-                  (matlisp:fill-matrix d 0)))))
-    (matlisp:fill-matrix A 0)
-    (setf (matlisp:diag A) -1)
-    (multiple-value-bind (A B c d x work info)
-        (lapack:dgglse m n p
-                       (matlisp::store A) (max 1 m)
-                       (matlisp::store B) (max 1 p)
-                       (matlisp::store c) (matlisp::store d)
-                       (matlisp::allocate-real-store m)
-                       (proj-work proj) (proj-lwork proj)
-                       0)
-      (declare (ignore A B c d))
-      (assert (= info 0))
-      (let ((lwork (ceiling (aref work 0))))
-        (when (> lwork (proj-lwork proj))
-          (setf (proj-lwork proj) lwork
-                (proj-work proj) (matlisp::allocate-real-store lwork))))
-      (make-instance 'matlisp:real-matrix
-                     :nrows m
-                     :ncols 1
-                     :store x))))
+         (N (matlisp:gemm! 1 B B 0 (proj-BBt proj) :nt))
+         (Bc (matlisp:m* B c))
+         (N^-1Bc (matlisp:gelsy! N Bc 1d-12)))
+    ;; c - Bt N^-1 B c
+    (matlisp:gemm! -1 B N^-1Bc 1 c :tn)))
 
-(defvar *max-slack* 1d10)
+(defvar *max-slack* 1d8)
 
 (defun max-step (l x u g)
   (let ((max-step double-float-positive-infinity))

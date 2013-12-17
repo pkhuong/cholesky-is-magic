@@ -147,7 +147,7 @@
                            (/ (- u x) g)))))
           (setf max-step (min max-step step)))))))
 
-(defvar *gamma* .99d0)
+(defvar *gamma* .9d0)
 
 (defun slack (l x u max)
   (matlisp:make-real-matrix
@@ -178,7 +178,8 @@
         (error "Unbounded problem"))
       (format t "~12,5g " norm-g)
       (when (or (< (min (* step norm-g) norm-g)
-                   (* 1d-8 (matlisp:nrows g)))
+                   (min (* 1d-10 (matlisp:nrows g))
+                        1d-6))
                 (plusp (matlisp:dot g (affine-c state))))
         (return-from one-affine-scaling-iteration
           (values state nil)))

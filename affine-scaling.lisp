@@ -62,6 +62,14 @@
                :lwork lwork
                :work (matlisp::allocate-real-store lwork))))))
 
+(defun scale-constraints (constraints scale)
+  (let* ((n (matlisp:ncols constraints))
+         (p (matlisp:nrows constraints))
+         (proj (allocate-work-space n p))
+         (scale (setf (matlisp:diag (proj-scale proj)) scale)))
+    (matlisp:gemm! 1 constraints scale
+                   0 (proj-B proj))))
+
 (defun project (scale c constraints &optional rhs)
   ;; min || Ix - [scale]c ||_2
   ;;  s.t.  [constraints][scale]x = 0
@@ -76,11 +84,7 @@
          (A (proj-A proj))
          (c (matlisp:m.*! scale
                           (matlisp:copy! c (proj-c proj))))
-         (scale (let ((m (proj-scale proj)))
-                  (setf (matlisp:diag m) scale)
-                  m))
-         (B (matlisp:gemm! 1 constraints scale
-                           0 (proj-B proj)))
+         (B (scale-constraints constraints scale))
          (d (let ((d (proj-d proj)))
               (if rhs
                   (matlisp:copy! rhs d)
@@ -172,8 +176,8 @@
               (matlisp:m* (affine-a state)
                           (affine-x state))))
 
-;; A(w [dg]) = r
-
+;; Least-square solve for
+;; ||Asx - r|| = 0
 (defun one-repair-iteration (state &optional residual)
   (declare (type affine-scaling-state state))
   (let* ((x (affine-x state))
@@ -182,10 +186,9 @@
          (slack (slack l x u (sqrt *max-slack*)))
          (residual (or residual
                         (residual state)))
-         (dg (project slack
-                      (matlisp:make-real-matrix-dim (matlisp:nrows x) 1)
-                      (affine-A state)
-                      residual))
+         (constraints (affine-A state))
+         (dg (matlisp:gelsy! (scale-constraints constraints slack)
+                             residual 1d-12))
          (g (matlisp:m.* dg slack)))
     (let ((step (* *gamma* (min (max-step l x u g) (/ *gamma*))))
           (norm-g (matlisp:norm g)))

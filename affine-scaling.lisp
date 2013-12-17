@@ -8,7 +8,10 @@
 (defun make-affine-state (sf)
   (declare (type standard-form sf))
   (let ((A (matlisp:make-real-matrix-dim (sf-ncons sf)
-                                         (sf-nvars sf))))
+                                         (sf-nvars sf)))
+        (x (matlisp:make-real-matrix-dim (sf-nvars sf) 1))
+        (l (matlisp:make-real-matrix (sf-l sf)))
+        (u (matlisp:make-real-matrix (sf-u sf))))
     (map nil (lambda (triplet)
                (declare (type triplet triplet))
                (setf (matlisp:matrix-ref A
@@ -16,26 +19,37 @@
                                          (triplet-col triplet))
                      (triplet-value triplet)))
          (sf-A sf))
+    (dotimes (i (sf-nvars sf))
+      (when (< (- (matlisp:matrix-ref u i)
+                  (matlisp:matrix-ref l i))
+               1d-6)
+        (decf (matlisp:matrix-ref l i) 5d-7)
+        (incf (matlisp:matrix-ref u i) 5d7))
+      (let* ((l (matlisp:matrix-ref l i))
+             (u (matlisp:matrix-ref u i))
+             (delta (- u l)))
+        (setf (matlisp:matrix-ref x i)
+              (cond ((and (< l -1d10) (> u 1d10))
+                       
+                     0d0)
+                    ((< l -1d10)
+                     (- u (min (/ delta 2)
+                               (1+ (* (abs u) .1d0)))))
+                    ((> u 1d10)
+                     (+ l (min (/ delta 2)
+                               (1+ (* (abs l) 1d0)))))
+                    (t
+                     (/ (+ l u) 2))))))
     (make-affine-scaling-state
-     :x (matlisp:make-real-matrix
-         (map '(simple-array double-float 1)
-              (lambda (l u)
-                (cond ((< l -1d10)
-                       (1- u))
-                      ((> u 1d10)
-                       (1+ l))
-                      (t
-                       (/ (+ l u) 2))))
-              (sf-l sf)
-              (sf-u sf)))
+     :x x
      :c (let ((v (matlisp:make-real-matrix-dim (sf-nvars sf) 1)))
           (loop for (i . x) across (sf-c sf)
                 do (setf (matlisp:matrix-ref v i) x))
           v)
      :A A
      :b (matlisp:make-real-matrix (sf-b sf))
-     :l (matlisp:make-real-matrix (sf-l sf))
-     :u (matlisp:make-real-matrix (sf-u sf)))))
+     :l l
+     :u u)))
 
 (defstruct (project-work-space
             (:conc-name #:proj-))

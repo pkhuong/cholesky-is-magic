@@ -123,7 +123,7 @@
                            (/ (- u x) g)))))
           (setf max-step (min max-step step)))))))
 
-(defvar *gamma* 98d-2)
+(defvar *gamma* .99d0)
 
 (defun slack (l x u max)
   (matlisp:make-real-matrix
@@ -151,6 +151,7 @@
     ;; better be a descent direction
     (assert (minusp (matlisp:dot g (affine-c state))))
     ;; and better satisfy the equality constraint
+    #+nil
     (assert (< (matlisp:norm (matlisp:m* (affine-A state) g))
                1d-4))
     (let ((step (* *gamma* (max-step l x u g)))
@@ -215,8 +216,10 @@
           (format t "~4d: " i)
           (destructuring-bind (state continue)
               (one-iteration state)
-            (unless continue
-              (return (values (matlisp:dot (affine-x state)
-                                           (affine-c state))
-                              (affine-x state)
-                              (matlisp:norm (residual state))))))))
+            (let ((residual (matlisp:norm (residual state))))
+              (unless (or continue
+                          (> residual 1d-6))
+                (return (values (matlisp:dot (affine-x state)
+                                             (affine-c state))
+                                (affine-x state)
+                                residual)))))))

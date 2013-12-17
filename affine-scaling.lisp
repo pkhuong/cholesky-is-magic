@@ -193,8 +193,22 @@
               (matlisp:m* (affine-a state)
                           (affine-x state))))
 
+(defun cholesky-ls! (A x)
+  (declare (optimize debug))
+  (assert (<= (matlisp:nrows A) (matlisp:ncols A)))
+  (let* ((n (matlisp:ncols A))
+         (out (matlisp:make-real-matrix-dim n 1))
+         (proj (allocate-work-space n (matlisp:nrows A)))
+         (N (matlisp:gemm! 1 A A 0 (proj-BBt proj) :nt))
+         (N^-1x (solve-symmetric! N x)))
+    (and N^-1x
+         (matlisp:gemm! 1 A N^-1x
+                        0 out
+                        :tn))))
+
 ;; Least-square solve for
-;; ||Asx - r|| = 0
+;; Asx - r = 0
+;;  min ||x||
 (defun one-repair-iteration (state &optional residual)
   (declare (type affine-scaling-state state))
   (let* ((x (affine-x state))
@@ -204,8 +218,10 @@
          (residual (or residual
                         (residual state)))
          (constraints (affine-A state))
-         (dg (matlisp:gelsy! (scale-constraints constraints slack)
-                             residual 1d-12))
+         (dg (or (cholesky-ls! (scale-constraints constraints slack)
+                               (matlisp:copy residual))
+                 (matlisp:gelsy! (scale-constraints constraints slack)
+                                 residual 1d-12)))
          (g (matlisp:m.* dg slack)))
     (let ((step (* *gamma* (min (max-step l x u g) (/ *gamma*))))
           (norm-g (matlisp:norm g)))

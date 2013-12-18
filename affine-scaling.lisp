@@ -6,7 +6,8 @@
   triplets
   %A %A-copy
   b
-  l u)
+  l u
+  (sparse-state (make-solve-sparse-state)))
 
 (defun affine-A (affine)
   (or (affine-%a affine)
@@ -88,26 +89,6 @@
      :l l
      :u u)))
 
-(defstruct (project-work-space
-            (:conc-name #:proj-))
-  scale
-  B
-  BBt
-  c
-  d)
-
-(defvar *work-space*)
-
-(defun allocate-work-space (n p)
-  (or *work-space*
-      (setf *work-space*
-            (make-project-work-space
-             :scale (matlisp:make-real-matrix-dim n n)
-             :B (matlisp:make-real-matrix-dim p n)
-             :BBt (matlisp:make-real-matrix-dim p p)
-             :c (matlisp:make-real-matrix-dim n 1)
-             :d (matlisp:make-real-matrix-dim p 1)))))
-
 (defun scale-constraints (constraints scale)
   (let* ((n (matlisp:ncols constraints))
          (p (matlisp:nrows constraints))
@@ -116,13 +97,13 @@
     (matlisp:gemm! 1 constraints scale
                    0 (proj-B proj))))
 
-(defun solve-symmetric! (A x)
+(defun solve-symmetric! (A x &optional sparse-state)
   ;; A\x, destructive on both
   ;;
   ;; Cholesky *should* be Good Enough.
-  (solve-sparse A x))
+  (solve-sparse A x sparse-state))
 
-(defun project (scale c constraints)
+(defun project (scale c constraints sparse-state)
   ;; min || x + [scale]c ||_2
   ;;  s.t.  [constraints][scale]x = 0
   ;;
@@ -133,7 +114,7 @@
                           (matlisp:scal -1 c)))
          (B (scale-sparse! constraints scale))
          (Bc (sparse-m* B c))
-         (N^-1Bc (solve-symmetric! B bc)))
+         (N^-1Bc (solve-symmetric! B bc sparse-state)))
     ;; c - Bt N^-1 B c
     (sparse-m* B N^-1Bc :transpose t :y c
                         :alpha -1d0 :beta 1d0)))
@@ -178,7 +159,8 @@
          (slack (slack l x u *max-slack*))
          (dg (project slack
                       (affine-c state)
-                      (affine-A-copy state)))
+                      (affine-A-copy state)
+                      (affine-sparse-state state)))
          (g (matlisp:m.* dg slack)))
     (let ((step (* *gamma* (max-step l x u g)))
           (norm-g (matlisp:norm g)))
@@ -201,11 +183,11 @@
               (sparse-m* (affine-a state)
                          (affine-x state))))
 
-(defun cholesky-ls! (A x)
+(defun cholesky-ls! (A x sparse-state)
   (declare (type (alien (* cholmod-sparse)) A)
            (optimize debug))
   (assert (<= (slot A 'nrow) (slot A 'ncol)))
-  (let ((N^-1x (solve-symmetric! A x)))
+  (let ((N^-1x (solve-symmetric! A x sparse-state)))
     (and N^-1x
          (sparse-m* A N^-1x :transpose t))))
 
@@ -221,7 +203,8 @@
          (residual (or residual
                         (residual state)))
          (constraints (scale-sparse! (affine-A-copy state) slack))
-         (dg (cholesky-ls! constraints residual))
+         (dg (cholesky-ls! constraints residual
+                           (affine-sparse-state state)))
          (g (matlisp:m.* dg slack)))
     (let ((step (* *gamma* (min (max-step l x u g) (/ *gamma*))))
           (norm-g (matlisp:norm g)))
@@ -263,6 +246,7 @@
                                        (affine-x state)
                                        residual))))))
       (free-affine-a state)
+      (free-sparse-state (affine-sparse-state state))
       (cholmod-free-work *cholmod-common*)
       (format t "Remaining space: ~A ~A ~%"
               (cholmod-get-malloc-count *cholmod-common*)

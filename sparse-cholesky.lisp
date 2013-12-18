@@ -343,13 +343,17 @@
 
 (defvar *cholmod-common*)
 
-(defun make-dense (nrow ncol vector)
+(defun make-dense (nrow ncol vector &optional destination)
   (declare (type (simple-array double-float 1) vector))
   (assert (= (length vector) (* nrow ncol)))
-  (let ((dense (cholmod-allocate-dense nrow ncol nrow
-                                       1
-                                       *cholmod-common*)))
+  (let ((dense (or destination
+                   (cholmod-allocate-dense nrow ncol nrow
+                                           1
+                                           *cholmod-common*))))
+    (declare (type (alien (* cholmod-dense)) dense))
     (assert (eql (slot dense 'dtype) 0))
+    (assert (= (slot dense 'nrow) nrow))
+    (assert (= (slot dense 'ncol) ncol))
     (sb-kernel:copy-ub8-to-system-area
      vector 0
      (sb-alien:alien-sap (slot dense 'x))
@@ -357,16 +361,20 @@
      (* 8 (length vector)))
     dense))
 
-(defun make-dense-from-matlisp (matrix)
+(defun make-dense-from-matlisp (matrix &optional destination)
   (make-dense (matlisp:nrows matrix)
               (matlisp:ncols matrix)
-              (matlisp::store matrix)))
+              (matlisp::store matrix)
+              destination))
 
-(defun dense-to-matlisp (x)
+(defun dense-to-matlisp (x &optional destination)
   (declare (type (alien (* cholmod-dense)) x))
   (let* ((nrow (slot x 'nrow))
          (ncol (slot x 'ncol))
-         (result (matlisp:make-real-matrix-dim nrow ncol)))
+         (result (or destination
+                     (matlisp:make-real-matrix-dim nrow ncol))))
+    (assert (= nrow (matlisp:nrows result)))
+    (assert (= ncol (matlisp:ncols result)))
     (sb-kernel:copy-ub8-from-system-area (sb-alien:alien-sap (slot x 'x)) 0
                                          (matlisp::store result)
                                          0
@@ -470,13 +478,15 @@
 
 (defstruct solve-sparse-state
   factor
+  rhs
   solution
-  workspace)
+  workspace-y
+  workspace-e)
 
 (defun free-sparse-state (state)
   (when (solve-sparse-state-factor state)
     (with-alien ((L (* cholmod-factor) :local
-                    (solve-sparse-state-factor state)))
+                    (shiftf (solve-sparse-state-factor state) nil)))
       (assert (/= 0 (cholmod-free-factor (addr L) *cholmod-common*)))))
   (flet ((free-dense (dense)
            (when dense
@@ -484,8 +494,14 @@
                              dense))
                (assert (/= 0 (cholmod-free-dense (addr d)
                                                  *cholmod-common*)))))))
-    (free-dense (solve-sparse-state-solution state))
-    (free-dense (solve-sparse-state-workspace state))))
+    (macrolet ((foo (&rest slots)
+                 `(progn
+                    ,@(loop for slot in slots collect
+                            `(free-dense (shiftf (,slot state) nil))))))
+      (foo solve-sparse-state-rhs
+           solve-sparse-state-solution
+           solve-sparse-state-workspace-y
+           solve-sparse-state-workspace-e))))
 
 (defun solve-sparse-one-shot (As b &aux (common *cholmod-common*))
   (with-alien ((As (* cholmod-sparse) :local As)
@@ -505,36 +521,41 @@
         (cholmod-free-factor (addr factor) common)
         (cholmod-free-dense (addr b) common)))))
 
-(defun solve-sparse-recycle (As b state &aux (common *cholmod-common*))
+(defun solve-sparse-recycle (As b state &aux (common *cholmod-common*)
+                                          (matlisp-b b))
   (with-alien ((As (* cholmod-sparse) :local As)
-               (b (* cholmod-dense) :local (make-dense-from-matlisp b))
+               (b (* cholmod-dense) :local (make-dense-from-matlisp
+                                            b
+                                            (solve-sparse-state-rhs state)))
                (factor (* cholmod-factor) :local
                        (or (solve-sparse-state-factor state)
                            (setf (solve-sparse-state-factor state)
-                                 (cholmod-analyze As
-                                                  common))))
+                                 (cholmod-analyze As common))))
                (X (* cholmod-dense) :local
                   (solve-sparse-state-solution state))
                (Y (* cholmod-dense) :local
-                  (solve-sparse-state-workspace state)))
+                  (solve-sparse-state-workspace-y state))
+               (E (* cholmod-dense) :local
+                  (solve-sparse-state-workspace-e state)))
     (cholmod-set-status common 0)
     (cholmod-factorize As factor common)
     (when (/= (cholmod-get-status common) 0)
       (return-from solve-sparse-recycle))
-    (assert (/= 0
-                (cholmod-solve2 0
-                                factor
-                                b
-                                nil
+    (unless (plusp (cholmod-solve2
+                    0
+                    factor
+                    b nil
+                   
+                    (addr X) nil
+                    (addr Y) (addr E)
 
-                                (addr X) nil
-                                (addr Y) nil
-
-                                common)))
-    (cholmod-free-dense (addr b) common)
-    (setf (solve-sparse-state-solution state) X
-          (solve-sparse-state-workspace state) Y)
-    (dense-to-matlisp x)))
+                    common))
+      (format t "status: ~A~%" (cholmod-get-status common)))
+    (setf (solve-sparse-state-rhs state) b
+          (solve-sparse-state-solution state) X
+          (solve-sparse-state-workspace-y state) Y
+          (solve-sparse-state-workspace-e state) E)
+    (dense-to-matlisp x matlisp-b)))
 
 (defun solve-sparse (As b &optional state)
   (if state
@@ -545,6 +566,7 @@
                              y
                              (alpha 1d0)
                              (beta (if y 1d0 0d0))
+                             output
                   &aux (nrow (slot sparse 'nrow))
                     (common *cholmod-common*))
   (declare (type (alien (* cholmod-sparse))  sparse)
@@ -585,6 +607,6 @@
       (cholmod-print-dense Y "y" common)
       (flush)
       (break))
-    (prog1 (dense-to-matlisp Y)
+    (prog1 (dense-to-matlisp Y output)
       (cholmod-free-dense (addr Y) common)
       (cholmod-free-dense (addr X) common))))

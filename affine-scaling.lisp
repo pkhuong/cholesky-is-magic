@@ -7,7 +7,7 @@
   %A %A-copy
   b
   l u
-  (sparse-state (make-solve-sparse-state)))
+  (sparse-state (make-solve-sparse-state) :read-only t))
 
 (defun affine-A (affine)
   (or (affine-%a affine)
@@ -88,14 +88,6 @@
      :b (matlisp:make-real-matrix (sf-b sf))
      :l l
      :u u)))
-
-(defun scale-constraints (constraints scale)
-  (let* ((n (matlisp:ncols constraints))
-         (p (matlisp:nrows constraints))
-         (proj (allocate-work-space n p))
-         (scale (setf (matlisp:diag (proj-scale proj)) scale)))
-    (matlisp:gemm! 1 constraints scale
-                   0 (proj-B proj))))
 
 (defun solve-symmetric! (A x &optional sparse-state)
   ;; A\x, destructive on both
@@ -232,19 +224,29 @@
   (declare (type affine-scaling-state state))
   (with-cholmod ()
     (unwind-protect
-         (loop with *work-space* = nil
-               for i upfrom 0 do
-                 (format t "~4d: " i)
-                 (destructuring-bind (state continue)
-                     (one-iteration state)
-                   (let* ((residual (residual state))
-                          (norm (matlisp:norm residual)))
-                     (unless (or continue
-                                 (> norm (* 1d-6 (matlisp:nrows residual))))
-                       (return (values (matlisp:dot (affine-x state)
-                                                    (affine-c state))
-                                       (affine-x state)
-                                       residual))))))
+         (let ((common *cholmod-common*))
+           (setf (solve-sparse-state-factor (affine-sparse-state state))
+                 (cholmod-analyze (affine-A state) common))
+           (assert (zerop (cholmod-get-status common)))
+           (format t "~
+AA':    nnz: ~12,5g flops: ~12,5g
+Factor: nnz: ~12,5g flops: ~12,5g~%"
+                   (cholmod-get-anz common)
+                   (cholmod-get-aatfl common)
+                   (cholmod-get-lnz common)
+                   (cholmod-get-fl common))
+           (loop for i upfrom 0 do
+             (format t "~4d: " i)
+             (destructuring-bind (state continue)
+                 (one-iteration state)
+               (let* ((residual (residual state))
+                      (norm (matlisp:norm residual)))
+                 (unless (or continue
+                             (> norm (* 1d-6 (matlisp:nrows residual))))
+                   (return (values (matlisp:dot (affine-x state)
+                                                (affine-c state))
+                                   (affine-x state)
+                                   residual)))))))
       (free-affine-a state)
       (free-sparse-state (affine-sparse-state state))
       (cholmod-free-work *cholmod-common*)

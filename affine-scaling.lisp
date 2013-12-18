@@ -4,25 +4,49 @@
   x
   c
   triplets
-  %A b
+  %A %A-copy
+  b
   l u)
 
 (defun affine-A (affine)
   (or (affine-%a affine)
-      (setf (affine-%a affine)
-            (make-sparse-from-triplet-vector
-             (affine-ncons affine)
-             (affine-nvars affine)
-             (affine-triplets affine)))))
+      (let ((A (make-sparse-from-triplet-vector
+                                (affine-ncons affine)
+                                (affine-nvars affine)
+                                (affine-triplets affine))))
+        (assert (not (affine-%a-copy affine)))
+        (setf (affine-%a-copy affine) (cholmod-copy-sparse
+                                       A
+                                       *cholmod-common*)
+              (affine-%a affine) A))))
+
+(define-alien-routine memcpy (* t)
+  (dst (* t))
+  (src (* t))
+  (len size-t))
+
+(defun affine-A-copy (affine)
+  (let ((A (affine-A affine))
+        (copy (affine-%a-copy affine)))
+    (declare (type (alien (* cholmod-sparse)) A copy))
+    (memcpy (slot copy 'x) (slot a 'x)
+            (* 8 (slot a 'nzmax)))
+    copy))
+
+(defun free-sparse (sparse)
+  (with-alien ((sparse (* cholmod-sparse)
+                       :local sparse))
+    (assert (/= (cholmod-free-sparse (addr sparse)
+                                     *cholmod-common*)
+                0))))
 
 (defun free-affine-A (affine)
-  (let ((sparse (shiftf (affine-%a affine) nil)))
+  (let ((sparse (shiftf (affine-%a affine) nil))
+        (copy   (shiftf (affine-%a-copy affine) nil)))
     (when sparse
-      (with-alien ((sparse (* cholmod-sparse)
-                           :local sparse))
-        (assert (/= (cholmod-free-sparse (addr sparse)
-                                         *cholmod-common*)
-                    0))))))
+      (free-sparse sparse))
+    (when copy
+      (free-sparse copy))))
 
 (defun make-affine-state (sf)
   (declare (type standard-form sf))
@@ -107,14 +131,12 @@
   ;; x = c - B'N^-1 B c
   (let* ((c (matlisp:m.*! scale
                           (matlisp:scal -1 c)))
-         (B (scale-sparse constraints scale))
+         (B (scale-sparse! constraints scale))
          (Bc (sparse-m* B c))
          (N^-1Bc (solve-symmetric! B bc)))
     ;; c - Bt N^-1 B c
-    (prog1 (sparse-m* B N^-1Bc :transpose t :y c
-                               :alpha -1d0 :beta 1d0)
-      (with-alien ((B (* cholmod-sparse) :local B))
-        (cholmod-free-sparse (addr B) *cholmod-common*)))))
+    (sparse-m* B N^-1Bc :transpose t :y c
+                        :alpha -1d0 :beta 1d0)))
 
 (defvar *max-slack* 1d8)
 
@@ -156,7 +178,7 @@
          (slack (slack l x u *max-slack*))
          (dg (project slack
                       (affine-c state)
-                      (affine-A state)))
+                      (affine-A-copy state)))
          (g (matlisp:m.* dg slack)))
     (let ((step (* *gamma* (max-step l x u g)))
           (norm-g (matlisp:norm g)))
@@ -198,13 +220,9 @@
          (slack (slack l x u (sqrt *max-slack*)))
          (residual (or residual
                         (residual state)))
-         (constraints (scale-sparse (affine-A state) slack))
-         (dg (cholesky-ls! constraints
-                           (matlisp:copy residual)))
+         (constraints (scale-sparse! (affine-A-copy state) slack))
+         (dg (cholesky-ls! constraints residual))
          (g (matlisp:m.* dg slack)))
-    (with-alien ((constraints (* cholmod-sparse)
-                              :local constraints))
-      (cholmod-free-sparse (addr constraints) *cholmod-common*))
     (let ((step (* *gamma* (min (max-step l x u g) (/ *gamma*))))
           (norm-g (matlisp:norm g)))
       (format t "~12,5g " norm-g)

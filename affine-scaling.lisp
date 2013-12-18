@@ -109,10 +109,11 @@
          (N^-1AD2c (solve-symmetric! AD AD2c
                                      sparse-state)))
     ;; Dc - (AD)t N^-1 AD Dc
-    (values (sparse-m* AD N^-1AD2c :transpose t :y sc
-                                   :alpha -1d0 :beta 1d0
-                                   :output sc)
-            N^-1AD2c)))
+    (and N^-1AD2c
+         (values (sparse-m* AD N^-1AD2c :transpose t :y sc
+                                        :alpha -1d0 :beta 1d0
+                                        :output sc)
+                 N^-1AD2c))))
 
 (defvar *max-slack* 1d8)
 
@@ -146,30 +147,61 @@
         (matlisp::store x)
         (matlisp::store u))))
 
-(defun one-affine-scaling-iteration (state)
+(defun centering-direction (l x u)
+  (matlisp:make-real-matrix
+   (map '(simple-array double-float 1)
+        (lambda (l x u)
+          (cond ((and (float-infinity-p l)
+                      (float-infinity-p u))
+                 0d0)
+                ((< (- x l) (- u x))
+                 (min 1d0 (- u x)))
+                (t
+                 (max -1d0 (- l x)))))
+        (matlisp::store l)
+        (matlisp::store x)
+        (matlisp::store u))))
+
+(defun one-affine-scaling-iteration (state &key centering)
   (declare (type affine-scaling-state state))
   (let* ((x (affine-x state))
          (l (affine-l state))
          (u (affine-u state))
          (slack (slack l x u *max-slack*)))
     (multiple-value-bind (dg ye)
-        (project slack (affine-c state)
+        (project slack (if centering
+                           (centering-direction l x u)
+                           (affine-c state))
                  (affine-A-copy state)
                  (affine-sparse-state state))
       (declare (ignore ye))
+      (unless dg
+        (format t " singular ")
+        (return-from one-affine-scaling-iteration
+          (values state nil)))
       (let* ((g (matlisp:m.* dg slack))
              (step (* *gamma* (max-step l x u g)))
              (norm-g (matlisp:norm g))
-             (norm-dg (matlisp:norm dg)))
+             (norm-dg (matlisp:norm dg))
+             (descent (matlisp:dot g (affine-c state))))
         (when (> step 1d10)
           (error "Unbounded problem"))
-        (format t "~12,5g ~12,5g" norm-g norm-dg)
-        (when (or (< (min (* step norm-g) norm-dg)
-                     (max (* 1d-10 (matlisp:nrows g))
-                          1d-6))
-                  (plusp (matlisp:dot g (affine-c state))))
-          (return-from one-affine-scaling-iteration
-            (values state nil)))
+        (format t "~12,5g ~12,5g"
+                (* step norm-g)
+                norm-dg)
+        (unless centering
+          (when (or (< norm-dg (min 1d-6
+                                    (* 1d-8 (matlisp:nrows x))))
+                    (plusp descent))
+            (when (plusp descent)
+              (format t " Not a descent direction "))
+            (return-from one-affine-scaling-iteration
+              (values state nil)))
+          (when (or (< (* step norm-g) 1d-6)
+                    (plusp descent))
+            (format t " ... ")
+            (return-from one-affine-scaling-iteration
+              (one-affine-scaling-iteration state :centering t))))
         (setf (affine-x state)
               (matlisp:axpy! step g x))))
     (values state t)))
@@ -210,7 +242,7 @@
             (matlisp:axpy step g x)))
     (values state t)))
 
-(defun one-iteration (state)
+(defun one-iteration (state &optional centering)
   (declare (type affine-scaling-state state))
   (let* ((residual (residual state))
          (norm (matlisp:norm residual)))
@@ -219,9 +251,14 @@
                (multiple-value-list (one-repair-iteration state residual))
              (format t "~12,5g~%" (matlisp:norm (residual state)))))
           (t
-           (prog2 (format t "Optimise: ~12,5g ... "
+           (prog2 (format t "~A ~12,5g ... "
+                          (if centering
+                              "Recenter:"
+                              "Optimize:")
                           (matlisp:dot (affine-x state) (affine-c state)))
-               (multiple-value-list (one-affine-scaling-iteration state))
+               (multiple-value-list (one-affine-scaling-iteration
+                                     state
+                                     :centering centering))
              (format t "~12,5g~%" (matlisp:dot (affine-x state)
                                              (affine-c state))))))))
 
@@ -243,7 +280,7 @@ Factor: nnz: ~12,5g flops: ~12,5g~%"
            (loop for i upfrom 0 do
              (format t "~4d: " i)
              (destructuring-bind (state continue)
-                 (one-iteration state)
+                 (one-iteration state (zerop (mod (1+ i) 16)))
                (let* ((residual (residual state))
                       (norm (matlisp:norm residual)))
                  (unless (or continue

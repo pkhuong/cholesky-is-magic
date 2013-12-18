@@ -228,31 +228,31 @@
                (alexandria:eswitch (type :test #'string-equal)
                  ("LO"
                   (check-type value double-float)
-                  (assert (not (col-data-lb data)))
+                  ;; (assert (not (col-data-lb data)))
                   (setf (col-data-lb data) value))
                  ("UP"
                   (check-type value double-float)
-                  (assert (not (col-data-ub data)))
+                  ;; (assert (not (col-data-ub data)))
                   (setf (col-data-ub data) value))
                  ("FX"
                   (check-type value double-float)
-                  (assert (not (col-data-lb data)))
-                  (assert (not (col-data-ub data)))
+                  ;; (assert (not (col-data-lb data)))
+                  ;; (assert (not (col-data-ub data)))
                   (setf (col-data-lb data) value
                         (col-data-ub data) value))
                  ("FR"
-                  (assert (not (col-data-lb data)))
-                  (assert (not (col-data-ub data)))
+                  ;; (assert (not (col-data-lb data)))
+                  ;; (assert (not (col-data-ub data)))
                   (setf (col-data-lb data) double-float-negative-infinity
                         (col-data-ub data) double-float-positive-infinity))
                  ("MI"
-                  (assert (not (col-data-lb data)))
-                  (assert (not (col-data-ub data)))
+                  ;; (assert (not (col-data-lb data)))
+                  ;; (assert (not (col-data-ub data)))
                   (setf (col-data-lb data) double-float-negative-infinity
                         (col-data-ub data) 0d0))
                  ("PL"
-                  (assert (not (col-data-lb data)))
-                  (assert (not (col-data-ub data)))
+                  ;; (assert (not (col-data-lb data)))
+                  ;; (assert (not (col-data-ub data)))
                   (setf (col-data-lb data) 0d0
                         (col-data-ub data) double-float-positive-infinity))))))
       (let ((bound-name nil))

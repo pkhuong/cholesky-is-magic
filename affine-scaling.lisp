@@ -1,24 +1,34 @@
 (defstruct (affine-scaling-state
             (:conc-name #:affine-))
+  nvars ncons
   x
   c
-  A b
+  triplets
+  %A b
   l u)
+
+(defun affine-A (affine)
+  (or (affine-%a affine)
+      (setf (affine-%a affine)
+            (make-sparse-from-triplet-vector
+             (affine-ncons affine)
+             (affine-nvars affine)
+             (affine-triplets affine)))))
+
+(defun free-affine-A (affine)
+  (let ((sparse (shiftf (affine-%a affine) nil)))
+    (when sparse
+      (with-alien ((sparse (* cholmod-sparse)
+                           :local sparse))
+        (assert (/= (cholmod-free-sparse (addr sparse)
+                                         *cholmod-common*)
+                    0))))))
 
 (defun make-affine-state (sf)
   (declare (type standard-form sf))
-  (let ((A (matlisp:make-real-matrix-dim (sf-ncons sf)
-                                         (sf-nvars sf)))
-        (x (matlisp:make-real-matrix-dim (sf-nvars sf) 1))
+  (let ((x (matlisp:make-real-matrix-dim (sf-nvars sf) 1))
         (l (matlisp:make-real-matrix (sf-l sf)))
         (u (matlisp:make-real-matrix (sf-u sf))))
-    (map nil (lambda (triplet)
-               (declare (type triplet triplet))
-               (setf (matlisp:matrix-ref A
-                                         (triplet-row triplet)
-                                         (triplet-col triplet))
-                     (triplet-value triplet)))
-         (sf-A sf))
     (dotimes (i (sf-nvars sf))
       (when (< (- (matlisp:matrix-ref u i)
                   (matlisp:matrix-ref l i))
@@ -41,12 +51,15 @@
                     (t
                      (/ (+ l u) 2))))))
     (make-affine-scaling-state
+     :nvars (sf-nvars sf)
+     :ncons (sf-ncons sf)
      :x x
      :c (let ((v (matlisp:make-real-matrix-dim (sf-nvars sf) 1)))
           (loop for (i . x) across (sf-c sf)
                 do (setf (matlisp:matrix-ref v i) x))
           v)
-     :A A
+     :triplets (sf-A sf)
+     :%A nil
      :b (matlisp:make-real-matrix (sf-b sf))
      :l l
      :u u)))
@@ -83,7 +96,7 @@
   ;; A\x, destructive on both
   ;;
   ;; Cholesky *should* be Good Enough.
-  (solve-dense A x))
+  (solve-sparse A x))
 
 (defun project (scale c constraints)
   ;; min || x + [scale]c ||_2
@@ -92,21 +105,16 @@
   ;; Let B = [constraints][scale], N = BB', c = -[scale]c
   ;;
   ;; x = c - B'N^-1 B c
-  (let* ((m (matlisp:nrows c))
-         (n m)
-         (p (matlisp:nrows constraints))
-         (proj (allocate-work-space n p))
-         (c (matlisp:m.*! scale
+  (let* ((c (matlisp:m.*! scale
                           (matlisp:scal -1 c)))
-         (B (scale-constraints constraints scale))
-         (Bc (matlisp:m* B c))
-         (N^-1Bc (or (solve-symmetric! B bc)
-                     (matlisp:gelsy! (matlisp:gemm! 1 B B 0 (proj-BBt proj)
-                                                    :nt)
-                                     (matlisp:m* B c)
-                                     1d-10))))
+         (B (scale-sparse constraints scale))
+         (Bc (sparse-m* B c))
+         (N^-1Bc (solve-symmetric! B bc)))
     ;; c - Bt N^-1 B c
-    (matlisp:gemm! -1 B N^-1Bc 1 c :tn)))
+    (prog1 (sparse-m* B N^-1Bc :transpose t :y c
+                               :alpha -1d0 :beta 1d0)
+      (with-alien ((B (* cholmod-sparse) :local B))
+        (cholmod-free-sparse (addr B) *cholmod-common*)))))
 
 (defvar *max-slack* 1d8)
 
@@ -168,19 +176,16 @@
 (defun residual (state)
   (declare (type affine-scaling-state state))
   (matlisp:m- (affine-b state)
-              (matlisp:m* (affine-a state)
-                          (affine-x state))))
+              (sparse-m* (affine-a state)
+                         (affine-x state))))
 
 (defun cholesky-ls! (A x)
-  (declare (optimize debug))
-  (assert (<= (matlisp:nrows A) (matlisp:ncols A)))
-  (let* ((n (matlisp:ncols A))
-         (out (matlisp:make-real-matrix-dim n 1))
-         (N^-1x (solve-symmetric! A x)))
+  (declare (type (alien (* cholmod-sparse)) A)
+           (optimize debug))
+  (assert (<= (slot A 'nrow) (slot A 'ncol)))
+  (let ((N^-1x (solve-symmetric! A x)))
     (and N^-1x
-         (matlisp:gemm! 1 A N^-1x
-                        0 out
-                        :tn))))
+         (sparse-m* A N^-1x :transpose t))))
 
 ;; Least-square solve for
 ;; Asx - r = 0
@@ -193,12 +198,13 @@
          (slack (slack l x u (sqrt *max-slack*)))
          (residual (or residual
                         (residual state)))
-         (constraints (affine-A state))
-         (dg (or (cholesky-ls! (scale-constraints constraints slack)
-                               (matlisp:copy residual))
-                 (matlisp:gelsy! (scale-constraints constraints slack)
-                                 residual 1d-12)))
+         (constraints (scale-sparse (affine-A state) slack))
+         (dg (cholesky-ls! constraints
+                           (matlisp:copy residual)))
          (g (matlisp:m.* dg slack)))
+    (with-alien ((constraints (* cholmod-sparse)
+                              :local constraints))
+      (cholmod-free-sparse (addr constraints) *cholmod-common*))
     (let ((step (* *gamma* (min (max-step l x u g) (/ *gamma*))))
           (norm-g (matlisp:norm g)))
       (format t "~12,5g " norm-g)
@@ -224,16 +230,22 @@
 (defun affine-scaling (state)
   (declare (type affine-scaling-state state))
   (with-cholmod ()
-    (loop with *work-space* = nil
-          for i upfrom 0 do
-            (format t "~4d: " i)
-            (destructuring-bind (state continue)
-                (one-iteration state)
-              (let* ((residual (residual state))
-                     (norm (matlisp:norm residual)))
-                (unless (or continue
-                            (> norm (* 1d-6 (matlisp:nrows residual))))
-                  (return (values (matlisp:dot (affine-x state)
-                                               (affine-c state))
-                                  (affine-x state)
-                                  residual))))))))
+    (unwind-protect
+         (loop with *work-space* = nil
+               for i upfrom 0 do
+                 (format t "~4d: " i)
+                 (destructuring-bind (state continue)
+                     (one-iteration state)
+                   (let* ((residual (residual state))
+                          (norm (matlisp:norm residual)))
+                     (unless (or continue
+                                 (> norm (* 1d-6 (matlisp:nrows residual))))
+                       (return (values (matlisp:dot (affine-x state)
+                                                    (affine-c state))
+                                       (affine-x state)
+                                       residual))))))
+      (free-affine-a state)
+      (cholmod-free-work *cholmod-common*)
+      (format t "Remaining space: ~A ~A ~%"
+              (cholmod-get-malloc-count *cholmod-common*)
+              (cholmod-get-memory-inuse *cholmod-common*)))))

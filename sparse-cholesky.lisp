@@ -40,6 +40,7 @@
 (define-alien-routine cholmod-start int (ptr (* cholmod-common)))
 (define-alien-routine cholmod-finish int (ptr (* cholmod-common)))
 (define-alien-routine cholmod-defaults int (ptr (* cholmod-common)))
+(define-alien-routine cholmod-free-work int (ptr (* cholmod-common)))
 
 (define-alien-type cholmod-sparse
   (struct cholmod-sparse-struct
@@ -122,6 +123,10 @@
   (fset (* int))
   (fsize size-t)
   (mode int)
+  (common (* cholmod-common)))
+
+(define-alien-routine cholmod-copy-sparse (* cholmod-sparse)
+  (A (* cholmod-sparse))
   (common (* cholmod-common)))
 
 (define-alien-routine cholmod-copy (* cholmod-sparse)
@@ -316,6 +321,26 @@
   (name c-string)
   (common (* cholmod-common)))
 
+(define-alien-routine cholmod-drop int
+  (tol double)
+  (A (* cholmod-sparse))
+  (common (* cholmod-common)))
+
+(define-alien-routine cholmod-scale int
+  (s (* cholmod-dense))
+  (scale int)
+  (A (* cholmod-sparse))
+  (common (* cholmod-common)))
+
+(define-alien-routine cholmod-sdmult int
+  (A (* cholmod-sparse))
+  (transpose int)
+  (alpha (* double))
+  (beta (* double))
+  (X (* cholmod-dense))
+  (Y (* cholmod-dense))
+  (common (* cholmod-common)))
+
 (defvar *cholmod-common*)
 
 (defun make-dense (nrow ncol vector)
@@ -397,3 +422,114 @@
         (cholmod-free-sparse (addr As) common)
         (cholmod-free-dense (addr A) common)))))
 
+(defun make-sparse-from-triplet-vector (nrow ncol vector
+                                        &aux (nnz (length vector))
+                                          (common *cholmod-common*))
+  (with-alien ((triplets (* cholmod-triplet) :local
+                         (cholmod-allocate-triplet nrow ncol
+                                                   nnz
+                                                   0 ;; unsymmetric
+                                                   1 ;; real
+                                                   common))
+               (rows (* int) :local (cast (slot triplets 'i)
+                                          (* int)))
+               (cols (* int) :local (cast (slot triplets 'j)
+                                          (* int)))
+               (xs   (* double) :local (cast (slot triplets 'x)
+                                             (* double))))
+    (loop for i upfrom 0
+          for triplet across vector
+          do (assert (< (triplet-row triplet) nrow))
+             (assert (< (triplet-col triplet) ncol))
+             (setf (deref rows i) (triplet-row triplet)
+                   (deref cols i) (triplet-col triplet)
+                   (deref xs   i) (triplet-value triplet)))
+    (setf (slot triplets 'nnz) nnz)
+    (let ((sparse (cholmod-triplet-to-sparse triplets nnz common)))
+      (cholmod-sort sparse common)
+      (cholmod-free-triplet (addr triplets) common)
+      sparse)))
+
+(defun scale-sparse! (sparse scale
+                     &aux (n (matlisp:nrows scale))
+                       (common *cholmod-common*))
+  (declare (type (alien (* cholmod-sparse)) sparse))
+  (assert (= n (slot sparse 'ncol)))
+  (with-alien ((dense (* cholmod-dense) :local
+                      (make-dense-from-matlisp scale)))
+    (assert (/= (cholmod-scale dense
+                               2 ; scale columns
+                               sparse common)
+                0))
+    (cholmod-free-dense (addr dense) common)
+    sparse))
+
+(defun scale-sparse (sparse scale)
+  (scale-sparse! (cholmod-copy-sparse sparse *cholmod-common*)
+                 scale))
+
+(defun solve-sparse (As b &aux (common *cholmod-common*))
+  (with-alien ((As (* cholmod-sparse) :local As)
+               (b (* cholmod-dense) :local (make-dense-from-matlisp b))
+               (factor (* cholmod-factor) :local (cholmod-analyze As
+                                                                  common)))
+    (cholmod-set-status common 0)
+    (cholmod-factorize As factor common)
+    (when (/= (cholmod-get-status common) 0)
+      (return-from solve-sparse))
+    (with-alien ((x (* cholmod-dense) :local (cholmod-solve 0
+                                                            factor
+                                                            b
+                                                            common)))
+      (prog1 (dense-to-matlisp x)
+        (cholmod-free-dense (addr x) common)
+        (cholmod-free-factor (addr factor) common)
+        (cholmod-free-dense (addr b) common)))))
+
+(defun sparse-m* (sparse x &key transpose
+                             y
+                             (alpha 1d0)
+                             (beta (if y 1d0 0d0))
+                  &aux (nrow (slot sparse 'nrow))
+                    (common *cholmod-common*))
+  (declare (type (alien (* cholmod-sparse))  sparse)
+           (optimize debug))
+  (let ((m nrow)
+        (n (slot sparse 'ncol)))
+    (when transpose (rotatef m n))
+    (assert (= 1 (matlisp:ncols x)))
+    (assert (= n (matlisp:nrows x)))
+    (when y
+      (assert (= 1 (matlisp:ncols y)))
+      (assert (= m (matlisp:nrows y)))))
+  (with-alien ((a (array double 2))
+               (b (array double 2))
+               (X (* cholmod-dense) :local (make-dense-from-matlisp x))
+               (Y (* cholmod-dense) :local
+                  (if y
+                      (make-dense-from-matlisp y)
+                      (cholmod-zeros (if transpose
+                                         (slot sparse 'ncol)
+                                         nrow)
+                                     1
+                                     1
+                                     common))))
+    (setf (deref a 0) alpha
+          (deref a 1) 0d0
+          (deref b 0) beta
+          (deref b 1) 0d0)
+    (unless (/= 0 (cholmod-sdmult sparse (if transpose 1 0)
+                                  (addr (deref a 0))
+                                  (addr (deref b 0))
+                                  X
+                                  Y
+                                  common))
+      (flush)
+      (cholmod-print-sparse sparse "A" common)
+      (cholmod-print-dense X "x" common)
+      (cholmod-print-dense Y "y" common)
+      (flush)
+      (break))
+    (prog1 (dense-to-matlisp Y)
+      (cholmod-free-dense (addr Y) common)
+      (cholmod-free-dense (addr X) common))))

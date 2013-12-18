@@ -468,7 +468,18 @@
   (scale-sparse! (cholmod-copy-sparse sparse *cholmod-common*)
                  scale))
 
-(defun solve-sparse (As b &aux (common *cholmod-common*))
+(defstruct solve-sparse-state
+  factor
+  solution
+  workspace)
+
+(defun free-sparse-state (state)
+  (when (solve-sparse-state-factor state)
+    (with-alien ((L (* cholmod-factor) :local
+                    (solve-sparse-state-factor state)))
+      (assert (/= 0 (cholmod-free-factor (addr L) *cholmod-common*))))))
+
+(defun solve-sparse-one-shot (As b &aux (common *cholmod-common*))
   (with-alien ((As (* cholmod-sparse) :local As)
                (b (* cholmod-dense) :local (make-dense-from-matlisp b))
                (factor (* cholmod-factor) :local (cholmod-analyze As
@@ -476,7 +487,7 @@
     (cholmod-set-status common 0)
     (cholmod-factorize As factor common)
     (when (/= (cholmod-get-status common) 0)
-      (return-from solve-sparse))
+      (return-from solve-sparse-one-shot))
     (with-alien ((x (* cholmod-dense) :local (cholmod-solve 0
                                                             factor
                                                             b
@@ -485,6 +496,31 @@
         (cholmod-free-dense (addr x) common)
         (cholmod-free-factor (addr factor) common)
         (cholmod-free-dense (addr b) common)))))
+
+(defun solve-sparse-recycle (As b state &aux (common *cholmod-common*))
+  (with-alien ((As (* cholmod-sparse) :local As)
+               (b (* cholmod-dense) :local (make-dense-from-matlisp b))
+               (factor (* cholmod-factor) :local
+                       (or (solve-sparse-state-factor state)
+                           (setf (solve-sparse-state-factor state)
+                                 (cholmod-analyze As
+                                                  common)))))
+    (cholmod-set-status common 0)
+    (cholmod-factorize As factor common)
+    (when (/= (cholmod-get-status common) 0)
+      (return-from solve-sparse-recycle))
+    (with-alien ((x (* cholmod-dense) :local (cholmod-solve 0
+                                                            factor
+                                                            b
+                                                            common)))
+      (prog1 (dense-to-matlisp x)
+        (cholmod-free-dense (addr x) common)
+        (cholmod-free-dense (addr b) common)))))
+
+(defun solve-sparse (As b &optional state)
+  (if state
+      (solve-sparse-recycle As b state)
+      (solve-sparse-one-shot As b)))
 
 (defun sparse-m* (sparse x &key transpose
                              y

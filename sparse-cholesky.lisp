@@ -382,7 +382,10 @@
                (b (* cholmod-dense) :local (make-dense-from-matlisp b))
                (factor (* cholmod-factor) :local (cholmod-analyze As
                                                                   common)))
+    (cholmod-set-status common 0)
     (cholmod-factorize As factor common)
+    (when (/= (cholmod-get-status common) 0)
+      (return-from solve-dense))
     (with-alien ((x (* cholmod-dense) :local (cholmod-solve 0
                                                             factor
                                                             b

@@ -79,25 +79,11 @@
     (matlisp:gemm! 1 constraints scale
                    0 (proj-B proj))))
 
-(defun solve-symmetric! (A x &aux (n (matlisp:nrows A)))
+(defun solve-symmetric! (A x)
   ;; A\x, destructive on both
   ;;
   ;; Cholesky *should* be Good Enough.
-  (multiple-value-bind (factor info)
-      (lapack:dpotrf "L" n
-                     (matlisp::store A) (max 1 n)
-                     0)
-    (unless (zerop info)
-      (format t " (DPOTRF: ~A) " info)
-      (return-from solve-symmetric!))
-    (multiple-value-bind (solution info)
-        (lapack:dpotrs "L" n 1
-                       factor (max 1 n)
-                       (matlisp::store x) (max 1 n)
-                       0)
-      (assert (zerop info))
-      (setf (matlisp::store x) solution)
-      x)))
+  (solve-dense A x))
 
 (defun project (scale c constraints)
   ;; min || x + [scale]c ||_2
@@ -113,9 +99,8 @@
          (c (matlisp:m.*! scale
                           (matlisp:scal -1 c)))
          (B (scale-constraints constraints scale))
-         (N (matlisp:gemm! 1 B B 0 (proj-BBt proj) :nt))
          (Bc (matlisp:m* B c))
-         (N^-1Bc (or (solve-symmetric! N bc)
+         (N^-1Bc (or (solve-symmetric! B bc)
                      (matlisp:gelsy! (matlisp:gemm! 1 B B 0 (proj-BBt proj)
                                                     :nt)
                                      (matlisp:m* B c)
@@ -191,9 +176,7 @@
   (assert (<= (matlisp:nrows A) (matlisp:ncols A)))
   (let* ((n (matlisp:ncols A))
          (out (matlisp:make-real-matrix-dim n 1))
-         (proj (allocate-work-space n (matlisp:nrows A)))
-         (N (matlisp:gemm! 1 A A 0 (proj-BBt proj) :nt))
-         (N^-1x (solve-symmetric! N x)))
+         (N^-1x (solve-symmetric! A x)))
     (and N^-1x
          (matlisp:gemm! 1 A N^-1x
                         0 out
@@ -240,16 +223,17 @@
 
 (defun affine-scaling (state)
   (declare (type affine-scaling-state state))
-  (loop with *work-space* = nil
-        for i upfrom 0 do
-          (format t "~4d: " i)
-          (destructuring-bind (state continue)
-              (one-iteration state)
-            (let* ((residual (residual state))
-                   (norm (matlisp:norm residual)))
-              (unless (or continue
-                          (> norm (* 1d-6 (matlisp:nrows residual))))
-                (return (values (matlisp:dot (affine-x state)
-                                             (affine-c state))
-                                (affine-x state)
-                                residual)))))))
+  (with-cholmod ()
+    (loop with *work-space* = nil
+          for i upfrom 0 do
+            (format t "~4d: " i)
+            (destructuring-bind (state continue)
+                (one-iteration state)
+              (let* ((residual (residual state))
+                     (norm (matlisp:norm residual)))
+                (unless (or continue
+                            (> norm (* 1d-6 (matlisp:nrows residual))))
+                  (return (values (matlisp:dot (affine-x state)
+                                               (affine-c state))
+                                  (affine-x state)
+                                  residual))))))))

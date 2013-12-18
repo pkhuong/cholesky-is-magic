@@ -102,14 +102,17 @@
   ;; Let B = [constraints][scale], N = BB', c = -[scale]c
   ;;
   ;; x = c - B'N^-1 B c
-  (let* ((c (matlisp:m.*! scale
-                          (matlisp:scal -1 c)))
-         (B (scale-sparse! constraints scale))
-         (Bc (sparse-m* B c))
-         (N^-1Bc (solve-symmetric! B bc sparse-state)))
-    ;; c - Bt N^-1 B c
-    (sparse-m* B N^-1Bc :transpose t :y c
-                        :alpha -1d0 :beta 1d0)))
+  (let* ((sc (matlisp:m.*! scale
+                           (matlisp:scal -1 c)))
+         (AD (scale-sparse! constraints scale))
+         (AD2c (sparse-m* AD sc))
+         (N^-1AD2c (solve-symmetric! AD AD2c
+                                     sparse-state)))
+    ;; Dc - (AD)t N^-1 AD Dc
+    (values (sparse-m* AD N^-1AD2c :transpose t :y sc
+                                   :alpha -1d0 :beta 1d0
+                                   :output sc)
+            N^-1AD2c)))
 
 (defvar *max-slack* 1d8)
 
@@ -148,25 +151,27 @@
   (let* ((x (affine-x state))
          (l (affine-l state))
          (u (affine-u state))
-         (slack (slack l x u *max-slack*))
-         (dg (project slack
-                      (affine-c state)
-                      (affine-A-copy state)
-                      (affine-sparse-state state)))
-         (g (matlisp:m.* dg slack)))
-    (let ((step (* *gamma* (max-step l x u g)))
-          (norm-g (matlisp:norm g)))
-      (when (> step 1d10)
-        (error "Unbounded problem"))
-      (format t "~12,5g " norm-g)
-      (when (or (< (min (* step norm-g) norm-g)
-                   (min (* 1d-10 (matlisp:nrows g))
-                        1d-6))
-                (plusp (matlisp:dot g (affine-c state))))
-        (return-from one-affine-scaling-iteration
-          (values state nil)))
-      (setf (affine-x state)
-            (matlisp:axpy! step g x)))
+         (slack (slack l x u *max-slack*)))
+    (multiple-value-bind (dg ye)
+        (project slack (affine-c state)
+                 (affine-A-copy state)
+                 (affine-sparse-state state))
+      (declare (ignore ye))
+      (let* ((g (matlisp:m.* dg slack))
+             (step (* *gamma* (max-step l x u g)))
+             (norm-g (matlisp:norm g))
+             (norm-dg (matlisp:norm dg)))
+        (when (> step 1d10)
+          (error "Unbounded problem"))
+        (format t "~12,5g ~12,5g" norm-g norm-dg)
+        (when (or (< (min (* step norm-g) norm-dg)
+                     (max (* 1d-10 (matlisp:nrows g))
+                          1d-6))
+                  (plusp (matlisp:dot g (affine-c state))))
+          (return-from one-affine-scaling-iteration
+            (values state nil)))
+        (setf (affine-x state)
+              (matlisp:axpy! step g x))))
     (values state t)))
 
 (defun residual (state)

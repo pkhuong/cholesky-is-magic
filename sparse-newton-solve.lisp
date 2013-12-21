@@ -173,10 +173,35 @@ Scale ALDAᵗ
                                dw)
                    h))))
 
+(defun solve-kkt-newton-check (l u w z A e f g h)
+  (multiple-value-bind (dw dx dy dz)
+      (apply 'solve-kkt-newton
+             (mapcar (lambda (x)
+                       (if (typep x 'matlisp:real-matrix)
+                           (matlisp:copy x)
+                           x))
+                     (list l u w z A e f g h)))
+    (assert (< (delta (matlisp:m- (matlisp:m.* u dw)
+                               (matlisp:m.* w dx))
+                   e)
+               1d-4))
+    (assert (< (delta (matlisp:m+ (matlisp:m.* z dx)
+                                  (matlisp:m.* l dz))
+                   f)
+               1d-4))
+    (assert (< (delta (sparse-m* A dx) g)
+               1d-4))
+    (assert (< (delta (matlisp:m- (matlisp:m+ (sparse-m* A dy :transpose t)
+                                           dz)
+                               dw)
+                   h)
+               1d-4))
+    (values dw dx dy dz)))
+
 (defun random-positive-vector (n)
   (matlisp:m.+ 1d-1 (matlisp:m.* 10 (matlisp:rand n 1))))
 
-(defun random-sparse-vector (m n &optional (density 1d-1))
+(defun random-sparse-vector (m n &optional (density 5d-2))
   (let ((triplets '()))
     (dotimes (i m (make-sparse-from-triplet-vector
                    m n
@@ -184,22 +209,29 @@ Scale ALDAᵗ
       (dotimes (j n)
         (when (or (= i j)
                   (< (random 1d0) density))
-          (push (make-triplet :row i :col j :value (random 1d0))
+          (push (make-triplet :row i :col j :value (1+ (random 1d0)))
                 triplets))))))
 
 (defun test-m-n (m n)
   (with-cholmod ()
-    (test-kkt-solve (random-positive-vector n)
-                    (random-positive-vector n)
-                    (random-positive-vector n)
-                    (random-positive-vector n)
+    (with-alien ((A (* cholmod-sparse) :local
+                    (random-sparse-vector m n)))
+      (multiple-value-prog1
+          (test-kkt-solve (random-positive-vector n)
+                          (random-positive-vector n)
+                          (random-positive-vector n)
+                          (random-positive-vector n)
+                    
+                          A
 
-                    (random-sparse-vector m n)
-
-                    (matlisp:rand n 1)
-                    (matlisp:rand n 1)
-                    (matlisp:rand m 1)
-                    (matlisp:rand n 1))))
+                          (matlisp:rand n 1)
+                          (matlisp:rand n 1)
+                          (matlisp:rand m 1)
+                          (matlisp:rand n 1))
+        (cholmod-free-sparse (addr A) *cholmod-common*)
+        (cholmod-free-work *cholmod-common*)
+        (assert (zerop (cholmod-get-malloc-count *cholmod-common*)))
+        (assert (zerop (cholmod-get-memory-inuse *cholmod-common*)))))))
 
 (defun test (max &aux (worst 0d0))
   (loop for m from 1 upto max do

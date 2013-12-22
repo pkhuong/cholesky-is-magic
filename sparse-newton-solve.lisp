@@ -24,6 +24,26 @@ Block matrix:
 -I              Aᵗ      -I     = h
 
 ||#
+
+;; if U is huge and W small, that row is only telling
+;; us that this w = 0
+(defun filter-U (u w e)
+  (let ((n (matlisp:nrows u)))
+    (assert (= n (matlisp:nrows w)))
+    (assert (= n (matlisp:nrows e)))
+    (dotimes (i n (values u w e))
+      (when (> (matlisp:mref u i) 1d7)
+        (setf (matlisp:matrix-ref u i) 1d0
+              (matlisp:matrix-ref e i) (matlisp:mref w i)
+              (matlisp:matrix-ref w i) 0d0)))))
+
+(defun filter-Z (z l f)
+  (dotimes (i (matlisp:nrows l) (values z l f))
+    (when (> (matlisp:mref l i) 1d7)
+      (setf (matlisp:matrix-ref l i) 1d0
+            (matlisp:matrix-ref f i) (matlisp:mref z i)
+            (matlisp:matrix-ref z i) 0d0))))
+
 (defun scale-U (u w e)
   (let ((inv-u (matlisp:map-matrix! #'/ u)))
     (values (matlisp:m.*! inv-u w)
@@ -102,7 +122,7 @@ sqrt(LD) = S
   (with-alien ((AS (* cholmod-sparse) :local
                    (cholmod-copy-sparse A *cholmod-common*)))
     (scale-sparse! AS s)
-    (prog1 (solve-sparse AS g)
+    (unwind-protect (the matlisp:real-matrix (solve-sparse AS g))
       (cholmod-free-sparse (addr AS) *cholmod-common*))))
 
 #||
@@ -116,6 +136,7 @@ Scale ALDAᵗ
 
 (defun solve-delta-z (D A h dy)
   (declare (optimize debug))
+  (assert dy)
   (let* ((DAtdy (matlisp:m.*! D
                               (sparse-m* A dy :transpose t))))
     (matlisp:axpy! -1 DAtdy h)))
@@ -130,14 +151,17 @@ Scale ALDAᵗ
                          e f g h)
   (let (wl+1 d s
         dw dx dy dz)
-    (setf (values w e) (scale-U U w e)
+    (setf (values u w e) (filter-U u w e)
+          (values z l f) (filter-Z z l f)
+          (values w e) (scale-U U w e)
           (values l f) (scale-Z Z l f)
           h            (clear-delta-w e h)
           g            (clear-delta-x-g A f g)
           (values wl+1 h) (clear-delta-x-h w l f h)
           (values d h) (scale-wl+1 wl+1 h)
           (values s g) (clear-delta-z A l d h g)
-          dy (solve-delta-y A S g)
+          dy (the matlisp:real-matrix
+                  (solve-delta-y A S g))
           dz (solve-delta-z D A H dy)
           dx (solve-delta-x L f dz)
           dw (solve-delta-w W e dx))
@@ -151,7 +175,7 @@ Scale ALDAᵗ
 -I              Aᵗ       I     = h
 ||#
 (defun delta (expected value)
-  (matlisp:norm (matlisp:m- expected value)))
+  (matlisp:norm (matlisp:m- expected value) :inf))
 
 (defun test-kkt-solve (l u w z A e f g h)
   (multiple-value-bind (dw dx dy dz)

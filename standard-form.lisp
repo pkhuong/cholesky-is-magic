@@ -11,7 +11,7 @@
   c ;; vector of (index . value)
   A ;; vector of triplets
   ;; dense vectors of values
-  b
+  b type
   l u
   initial-vars)
 
@@ -28,6 +28,10 @@
                         :element-type 'double-float
                         :adjustable t
                         :fill-pointer 0))
+         (type (make-array (length (mps-data-row-data mps))
+                           :initial-element nil
+                           :adjustable t
+                           :fill-pointer 0))
          (nvars (length (mps-data-col-data mps)))
          (l (make-array nvars
                         :element-type 'double-float
@@ -58,16 +62,19 @@
             do (let ((lb (row-data-lb row))
                      (ub (row-data-ub row)))
                  (cond ((= lb ub)
+                        (vector-push-extend nil type)
                         (vector-push-extend lb b))
                        ((= ub double-float-positive-infinity)
                         ;;      ax >= b
                         ;; -> ax - s = b
                         (vector-push-extend lb b)
+                        (vector-push-extend '> type)
                         (artificial-var i -1))
                        ((= lb double-float-negative-infinity)
                         ;;       ax <= b
                         ;; -> ax + s = b
                         (vector-push-extend ub b)
+                        (vector-push-extend '< type)
                         (artificial-var i 1))
                        (t
                         ;; l <= ax <= b
@@ -75,6 +82,7 @@
                         ;; ax + s = b
                         ;;  s <= (b - l)
                         (vector-push-extend ub b)
+                        (vector-push-extend nil type)
                         (artificial-var i 1 0 (- ub lb)))))))
     (assert (= (length l) (length u)))
     (make-standard-form
@@ -91,6 +99,30 @@
                         c)))
      :A (coerce A 'simple-vector)
      :b (coerce b 'simple-vector)
+     :type (coerce type 'simple-vector)
      :l (coerce l 'simple-vector)
      :u (coerce u 'simple-vector)
      :initial-vars nvars)))
+
+#+nil
+(defun densify (sf)
+  (let ((A (matlisp:make-real-matrix-dim (sf-ncons sf)
+                                         (sf-nvars sf))))
+    (map nil (lambda (triplet)
+               (setf (matlisp:matrix-ref A
+                                         (triplet-row triplet)
+                                         (triplet-col triplet))
+                     (triplet-value triplet)))
+         (sf-A sf))
+    (make-standard-form
+     :nvars (sf-nvars sf)
+     :ncons (sf-ncons sf)
+     :c (let ((v (matlisp:make-real-matrix-dim (sf-nvars sf) 1)))
+          (loop for (i . x) across (sf-c sf)
+                do (setf (matlisp:matrix-ref v i) x))
+          v)
+     :A A
+     :b (matlisp:make-real-matrix (sf-b sf))
+     :l (matlisp:make-real-matrix (sf-l sf))
+     :u (matlisp:make-real-matrix (sf-u sf))
+     :initial-vars (sf-initial-vars sf))))

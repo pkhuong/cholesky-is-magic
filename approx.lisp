@@ -18,6 +18,20 @@ subject to l <= x <= u
 (deftype dvec (&optional length)
   `(simple-array double-float (,length)))
 
+;; linear obj -> Lipschitz constant = 0
+(defstruct (linear
+            (:constructor %make-linear))
+  (indices (error "Missing arg") :type ivec)
+  (coefs (error "Missing arg") :type dvec))
+
+(defun make-linear (pairs)
+  (let ((pairs (remove 0 pairs :key #'cdr :test #'=)))
+    (%make-linear
+     :indices (map 'ivec #'car pairs)
+     :coefs (map 'dvec (lambda (x)
+                         (float (cdr x) 1d0))
+                 pairs))))
+
 ;; 1/2 |ax-b|^2
 (defstruct (quadratic
             (:constructor %make-quadratic)
@@ -79,6 +93,9 @@ subject to l <= x <= u
 
 ;; Global Lipschitz-esque value
 (defgeneric accumulate-nu (constraint nu)
+  (:method ((c linear) nu)
+    ;; Lipschitz constant = 0: we're elementwise
+    nu)
   (:method ((c complementarity) nu)
     ;; Lipschitz constant = 0: we're elementwise
     nu)
@@ -103,7 +120,8 @@ subject to l <= x <= u
   (l (error "Missing arg") :type dvec)
   (u (error "Missing arg") :type dvec)
   (c (error "Missing arg") :type simple-vector)
-  (b (error "Missing arg") :type dvec))
+  (b (error "Missing arg") :type dvec)
+  (z0 0d0 :type double-float))
 
 (defun primal-value (approx x)
   (reduce #'+ (approx-c approx)
@@ -152,7 +170,8 @@ subject to l <= x <= u
     acc))
 
 (defun make-approx-state (orig-vars orig-cons
-                          constraints nvars l u c b)
+                          constraints nvars l u c b
+                          &key (z0 0d0))
   (let* ((constraints (coerce constraints 'simple-vector))
          (nu (make-array nvars :element-type 'double-float
                                :initial-element 0d0)))
@@ -166,17 +185,18 @@ subject to l <= x <= u
                         :l l
                         :u u
                         :c c
-                        :b b)))
+                        :b b
+                        :z0 z0)))
 ;; Vars: x, y, z, w
 ;; quad: |Ax-b|
 ;; quad: |yA + z - w - c|
 ;; comp: z(x-l)
 ;; comp: w(u-x)
-(defun make-approx (sf &key complementarity (scale t))
+(defun make-approx (sf &key complementarity (scale t) (l1-penalty 0d0))
   (let* ((nvars (sf-nvars sf))
          (ncons (sf-ncons sf))
          (n (+ (* 3 nvars) ncons))
-         (constraints (make-array (1+ n) :initial-element nil))
+         (constraints (make-array (+ 2 n) :initial-element nil))
          (l (make-array n :element-type 'double-float
                           :initial-element double-float-negative-infinity))
          (u (make-array n :element-type 'double-float
@@ -247,6 +267,23 @@ subject to l <= x <= u
          (sf-c sf))
     (setf (aref constraints n)
           (make-quadratic (aref constraints n)))
+    (setf (aref constraints (1+ n))
+          (make-linear
+           (loop
+             for i below nvars
+             for l across l
+             for u across u
+             collect (cons i
+                           (cond ((and (= l double-float-negative-infinity)
+                                       (< u double-float-positive-infinity))
+                                  (- l1-penalty))
+                                 ((and (> l double-float-negative-infinity)
+                                       (= u double-float-positive-infinity))
+                                  l1-penalty)
+                                 (t 0d0)))
+             collect (cons (+ i nvars ncons) l1-penalty)
+             collect (cons (+ i nvars ncons nvars)
+                           l1-penalty))))
     (when scale
       (loop for i upto n
             for c = (aref constraints i)
@@ -262,6 +299,14 @@ subject to l <= x <= u
        (coerce (sf-b sf) 'dvec)))))
 
 (defgeneric %value-&-gradient (constraint x &optional g)
+  (:method ((c linear) x &optional g)
+    (let ((acc 0d0))
+      (map nil (lambda (i v)
+                 (incf acc (* v (aref x i)))
+                 (incf (aref g i) v))
+           (linear-indices c)
+           (linear-coefs c))
+      acc))
   (:method ((c complementarity) x &optional g)
     (let* ((xi (comp-xi c))
            (yi (comp-yi c))
@@ -408,7 +453,60 @@ subject to l <= x <= u
                     (2norm g)
                     pg
                     max
-                    value
+                    (+ value (approx-z0 state))
                     (complementarity-violation state z)))
           (when done
             (return z)))))))
+
+(defun dot (x y)
+  (let ((acc 0d0))
+    (map nil (lambda (x y)
+               (incf acc (* x y)))
+         x y)
+    acc))
+
+(defun make-alm-subproblem (sf lambda weight)
+  (let* ((nvars (sf-nvars sf))
+         (ncons (sf-ncons sf))
+         (constraints (make-array (1+ ncons) :initial-element nil))
+         (l (make-array nvars :element-type 'double-float
+                              :initial-contents (sf-l sf)))
+         (u (make-array nvars :element-type 'double-float
+                              :initial-contents (sf-u sf)))
+         (c (make-array nvars :element-type 'double-float
+                              :initial-element 0d0))
+         (b (coerce (sf-b sf) 'dvec)))
+    (map nil (lambda (pair)
+               (destructuring-bind (xi . v) pair
+                 (setf (aref c xi) v)))
+         (sf-c sf))
+    (map nil (lambda (triplet)
+               (let ((x (triplet-col triplet))
+                     (y (triplet-row triplet))
+                     (v (triplet-value triplet)))
+                 (push (cons x v) (aref constraints y))
+                 (incf (aref c x) (* (aref lambda y) v))))
+         (sf-A sf))
+    (loop for i below ncons
+          do (setf (aref constraints i)
+                   (make-quadratic (aref constraints i)
+                                   :rhs (aref b i))))
+    (setf (aref constraints ncons)
+          (make-linear (loop for i upfrom 0
+                             for c across c
+                             when (/= c 0d0)
+                               collect (cons i c))))
+    (loop for c across constraints
+          when (quadratic-p c)
+            do (scale-quadratic c)
+               (setf (quad-scale c) (* (sqrt weight) (quad-scale c))))
+    (let ((constraints (remove nil constraints)))
+      (make-approx-state
+       (sf-nvars sf) (sf-ncons sf)
+       constraints
+       nvars
+       l u
+       (coerce (sf-c sf) 'simple-vector)
+       b
+       :z0 (- (dot lambda c))))))
+
